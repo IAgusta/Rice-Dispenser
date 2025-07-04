@@ -13,7 +13,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 const int HX711_dout = 4;
 const int HX711_sck = 16;
 HX711_ADC LoadCell(HX711_dout, HX711_sck);
-const float CALIBRATION_FACTOR = 160.0;
+const float CALIBRATION_FACTOR = 180.0;
 
 #define SERVO_PIN_1 19
 #define SERVO_PIN_2 23
@@ -36,14 +36,26 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 unsigned long keyPressStart = 0;
 char lastKeyPressed = 0;
+bool showPassword = false;
+
+const String ADMIN_PASSWORD = "6969";
+enum PasswordMode {
+  NONE_PASS,
+  ENTER_PASS
+} passwordMode = NONE_PASS;
+
+char pendingKey = '\0'; // temporarily holds which key is trying access
+String passwordInput = "";
 
 enum SpecialMode {
   NONE,
   EDIT_MIN_VALUE,
   EDIT_PRICE,
   CONFIRM_RESET,
+  CONFIRM_EXECUTE,
+  SHOW_IP,
   CONFIRM_ROLLBACK,
-  SHOW_IP
+  SETTING_FACTOR
 } specialMode = NONE;
 
 String specialInput = "";
@@ -60,6 +72,7 @@ const char* password = "password123";
 #define MIN_QTY_ADDR (MIN_PRICE_ADDR + sizeof(float))
 #define RICE_ADDR (MIN_QTY_ADDR + sizeof(float))
 #define EARN_ADDR (RICE_ADDR + sizeof(float))
+#define CAL_FACTOR_ADDR (EARN_ADDR + sizeof(float))
 
 String currentInput = "";
 bool inputMode = false;
@@ -71,6 +84,7 @@ float totalEarnings = 0.0;
 float pricePerKgA = 15000.0;
 float pricePerKgB = 15000.0;
 float lastDropWeight = 0.0;
+float calFactor = CALIBRATION_FACTOR;
 int lastDropType = 1;
 
 void initializeLCD() {
@@ -116,6 +130,9 @@ void loadPersistentData() {
   EEPROM.get(MIN_QTY_ADDR, minQuantity);
   EEPROM.get(RICE_ADDR, totalRiceDropped);
   EEPROM.get(EARN_ADDR, totalEarnings);
+  EEPROM.get(CAL_FACTOR_ADDR, calFactor);
+  if (isnan(calFactor) || calFactor < 10.0) calFactor = CALIBRATION_FACTOR;
+  LoadCell.setCalFactor(calFactor);
   if (isnan(pricePerKgA) || pricePerKgA < 1000) pricePerKgA = 15000.0;
   if (isnan(pricePerKgB) || pricePerKgB < 1000) pricePerKgB = 15000.0;
   if (isnan(minPrice) || minPrice < 100) minPrice = 5000.0;
@@ -131,6 +148,7 @@ void savePersistentData() {
   EEPROM.put(MIN_QTY_ADDR, minQuantity);
   EEPROM.put(RICE_ADDR, totalRiceDropped);
   EEPROM.put(EARN_ADDR, totalEarnings);
+  EEPROM.put(CAL_FACTOR_ADDR, calFactor);
   EEPROM.commit();
 }
 
@@ -153,67 +171,94 @@ void executeTransaction() {
     targetWeight = inputValue / pricePerKg;
   }
 
-  servo3.write(SERVO_CLOSE_ANGLE); // Close the door untill the transaction complete
+  servo3.write(SERVO_CLOSE_ANGLE); // Close output door
   lcd.clear(); lcd.print("Memulai Proses..");
   delay(500);
   lcd.setCursor(0, 1); lcd.print("Menutup Pintu...");
-  delay(500);
+  delay(1500);
+  lcd.clear(); lcd.print("Menyiapkan");
+  lcd.setCursor(0, 1); lcd.print("Timbangan...");
   LoadCell.tare();
-  lcd.clear(); lcd.print("Proses...");
 
-  if (selectedServo == 1) servo1.write(SERVO_OPEN_ANGLE);
-  else servo2.write(SERVO_OPEN_ANGLE);
-
-  float currentWeight = 0;
-  unsigned long startTime = millis();
-  while (millis() - startTime < 60000) {
-    if (LoadCell.update()) {
-      currentWeight = abs(LoadCell.getData()) / 1000.0; 
-      lcd.setCursor(0, 1);
-      lcd.print(currentWeight, 2);
-      lcd.print("/" + String(targetWeight, 2) + " kg");
-      if (currentWeight >= targetWeight) break;
+  unsigned long tareStart = millis();
+  while (!LoadCell.update() || abs(LoadCell.getData()) > 50) {
+    if (millis() - tareStart > 5000) {
+      lcd.clear(); lcd.print("Tare Gagal!");
+      delay(2000);
+      return;
     }
     delay(100);
   }
 
-  // Open the servo based of the rice type
+  lcd.clear(); lcd.print("Proses...");
+  lcd.setCursor(0, 1); lcd.print("Menimbang...");
+
+  if (selectedServo == 1) servo1.write(SERVO_OPEN_ANGLE);
+  else servo2.write(SERVO_OPEN_ANGLE);
+
+  float weightBuffer[10] = {0};
+  int bufferIndex = 0;
+  float avgWeight = 0.0;
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < 60000) {
+    if (LoadCell.update()) {
+      float newWeight = abs(LoadCell.getData()) / 1000.0;
+
+      weightBuffer[bufferIndex] = newWeight;
+      bufferIndex = (bufferIndex + 1) % 10;
+
+      float sum = 0;
+      for (int i = 0; i < 10; i++) sum += weightBuffer[i];
+      avgWeight = sum / 10.0;
+
+      lcd.setCursor(0, 1);
+      lcd.print("               ");
+      lcd.setCursor(0, 1);
+      lcd.print(avgWeight, 2);
+      lcd.print("/");
+      lcd.print(targetWeight, 2); lcd.print("kg");
+
+      if (avgWeight >= targetWeight) break;
+    }
+    delay(100);
+  }
+
+  // Close rice valve
   if (selectedServo == 1) servo1.write(SERVO_CLOSE_ANGLE);
   else servo2.write(SERVO_CLOSE_ANGLE);
   delay(1000);
 
-  if (currentWeight >= targetWeight) {
-    lastDropWeight = currentWeight;
+  if (avgWeight >= targetWeight) {
+    lastDropWeight = avgWeight;
     lastDropType = selectedServo;
 
-    float rawPrice = currentWeight * pricePerKg;
+    float rawPrice = avgWeight * pricePerKg;
     int roundedPrice = ((int)(rawPrice + 250) / 500) * 500;
 
-    totalRiceDropped += currentWeight;
+    totalRiceDropped += avgWeight;
     totalEarnings += roundedPrice;
     savePersistentData();
 
-    servo3.write(SERVO_OPEN_ANGLE);
+    servo3.write(SERVO_OPEN_ANGLE); // Open output door
     lcd.clear(); lcd.print("Transaksi Berhasil");
     lcd.setCursor(0, 1); lcd.print("Pintu Dapat Dibuka");
     delay(2500);
 
-    lcd.clear(); lcd.print("Harga Beras");
+    lcd.clear(); lcd.print("Harga Beras:");
     lcd.setCursor(0, 1); lcd.print("Rp."); lcd.print(roundedPrice);
     delay(2500);
 
-    lcd.clear(); lcd.print("Total Dikeluarkan");
+    lcd.clear(); lcd.print("Total Keluar:");
     lcd.setCursor(0, 1); lcd.print(totalRiceDropped, 2); lcd.print(" Kg");
     delay(2500);
 
     lcd.clear(); lcd.print("Bisa Digunakan");
     lcd.setCursor(0, 1); lcd.print("Tekan Tombol");
   } else {
-    lcd.clear(); lcd.print("Incomplete");
-    lcd.setCursor(0, 1); lcd.print(currentWeight, 2); lcd.print(" kg");
+    lcd.clear(); lcd.print("Tidak Cukup");
+    lcd.setCursor(0, 1); lcd.print(avgWeight, 2); lcd.print(" kg");
     delay(3000);
-
-    // reset rollback reference
     lastDropWeight = 0;
     lastDropType = 0;
   }
@@ -256,8 +301,14 @@ void processKey(char key) {
         inputCleared = true;
         break;
       case 'D':
-        executeTransaction();
-        return;
+        if (currentInput.length() > 0 && specialMode == NONE) {
+          specialMode = CONFIRM_EXECUTE;
+          awaitingInput = true;
+          servo3.write(SERVO_CLOSE_ANGLE); // Close tray door first
+          lcd.clear(); lcd.print("Lanjut Transaksi");
+          lcd.setCursor(0, 1); lcd.print("Tidak: C, Ya: D");
+        }
+      return;
     }
   }
   if (key != 'A' && key != 'B') {
@@ -273,6 +324,31 @@ void handleHeldKey(char key) {
   specialInput = "";
   awaitingInput = true;
 
+  if (key == 'A' || key == 'B' || key == 'C' || key == '#' || key == '*') {
+    passwordMode = ENTER_PASS;
+    passwordInput = "";
+    pendingKey = key;
+    lcd.clear();
+    lcd.print("Masukkan Password");
+    lcd.setCursor(0, 1);
+    return;
+  }
+
+  if (key == 'D') {
+    lcd.clear();
+    lcd.print("Total Pendapatan");
+    lcd.setCursor(0, 1);
+    lcd.print("Rp." + String(totalEarnings, 0));
+    delay(4000);
+    specialMode = NONE;
+    awaitingInput = false;
+  }
+}
+
+void handleAuthorizedHeldKey(char key) {
+  specialInput = "";
+  awaitingInput = true;
+
   switch (key) {
     case 'A':
       specialMode = inputMode ? EDIT_MIN_VALUE : EDIT_MIN_VALUE;
@@ -281,49 +357,47 @@ void handleHeldKey(char key) {
       lcd.setCursor(0, 1);
       lcd.print(inputMode ? "Min. " + String(minQuantity, 2) + " kg" : "Rp." + String(minPrice, 0));
       break;
-        case 'B':
-          specialMode = EDIT_PRICE;
-          lcd.clear();
-          lcd.print("Harga Tipe ");
-          lcd.print((selectedServo == 1) ? "A" : "B");
-          lcd.setCursor(0, 1);
-          lcd.print("Rp." + String((selectedServo == 1 ? pricePerKgA : pricePerKgB), 0));
-          break;
-            case 'C':
-              specialMode = CONFIRM_RESET;
-              awaitingInput = true;
-              lcd.clear();
-              lcd.print("Hapus Pendapatan?");
-              lcd.setCursor(0, 1);
-              lcd.print("No: C, Yes: D");
-              break;
-                case 'D':
-                lcd.clear();
-                lcd.print("Total Pendapatan");
-                lcd.setCursor(0, 1);
-                lcd.print("Rp." + String(totalEarnings, 0));
-                delay(4000);
-                specialMode = NONE;
-                awaitingInput = false;
-                break;
-                case '#':
-                  if (lastDropWeight > 0.0) {
-                    specialMode = CONFIRM_ROLLBACK;
-                    awaitingInput = true;
-                    lcd.clear();
-                    lcd.print("Batalkan Terakhir?");
-                    lcd.setCursor(0, 1);
-                    lcd.print("No: C, Yes: D");
-                  } else {
-                    lcd.clear();
-                    lcd.print("Tidak Ada Data");
-                    lcd.setCursor(0, 1);
-                    lcd.print("Untuk Dibatalkan");
-                    delay(2500);
-                    specialMode = NONE;
-                    awaitingInput = false;
-                  }
-                  break;
+    case 'B':
+      specialMode = EDIT_PRICE;
+      lcd.clear();
+      lcd.print("Harga Tipe ");
+      lcd.print((selectedServo == 1) ? "A" : "B");
+      lcd.setCursor(0, 1);
+      lcd.print("Rp." + String((selectedServo == 1 ? pricePerKgA : pricePerKgB), 0));
+      break;
+    case 'C':
+      specialMode = CONFIRM_RESET;
+      lcd.clear();
+      lcd.print("Hapus Pendapatan?");
+      lcd.setCursor(0, 1);
+      lcd.print("No: C, Yes: D");
+      break;
+    case '#':
+      if (lastDropWeight > 0.0) {
+        specialMode = CONFIRM_ROLLBACK;
+        lcd.clear();
+        lcd.print("Batalkan Terakhir?");
+        lcd.setCursor(0, 1);
+        lcd.print("No: C, Yes: D");
+      } else {
+        lcd.clear();
+        lcd.print("Tidak Ada Data");
+        lcd.setCursor(0, 1);
+        lcd.print("Untuk Dibatalkan");
+        delay(2500);
+        specialMode = NONE;
+        awaitingInput = false;
+      }
+      break;
+    case '*':
+      specialMode = SETTING_FACTOR;
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Cal_Factor =");
+      lcd.print(calFactor, 2);
+      lcd.setCursor(0, 1);
+      lcd.print("New_Cal: ");
+      break;
   }
 }
 
@@ -347,6 +421,75 @@ void handleSpecialInput(char key) {
       delay(2000);
     }
     return; // no further processing
+  }
+
+  if (specialMode == SETTING_FACTOR) {
+    if (key == 'C') {
+      specialMode = NONE;
+      awaitingInput = false;
+      specialInput = "";
+      lcd.clear(); lcd.print("Dibatalkan");
+      delay(1500);
+      return;
+    }
+
+    if (key == '#') {
+      if (specialInput.length() > 0)
+        specialInput.remove(specialInput.length() - 1);
+    } else if (key == 'D') {
+      if (specialInput.length() > 0) {
+        float val = specialInput.toFloat();
+        if (val >= 10.0 && val <= 100000.0) {
+          calFactor = val;
+          LoadCell.setCalFactor(calFactor);
+          savePersistentData();
+          lcd.clear(); lcd.print("Disimpan:");
+          lcd.setCursor(0, 1); lcd.print("Cal: "); lcd.print(calFactor, 2);
+          delay(2000);
+        } else {
+          lcd.clear(); lcd.print("Nilai Tidak Valid");
+          delay(2000);
+        }
+      }
+      specialMode = NONE;
+      awaitingInput = false;
+      return;
+    } else if (key >= '0' && key <= '9') {
+      specialInput += key;
+    } else if (key == '*') {
+      if (specialInput.indexOf('.') == -1)
+        specialInput += ".";
+    }
+
+    lcd.setCursor(0, 1);
+    lcd.print("                ");
+    lcd.setCursor(0, 1);
+    lcd.print("New_Cal: " + specialInput);
+    return;
+  }
+
+  if (specialMode == CONFIRM_EXECUTE) {
+    if (key == 'D') {
+      // Confirm and run transaction
+      specialMode = NONE;
+      awaitingInput = false;
+      executeTransaction();
+    } else if (key == 'C') {
+      // Cancel, reopen door and return to input
+      specialMode = NONE;
+      awaitingInput = false;
+      servo3.write(SERVO_OPEN_ANGLE); // reopen if canceled
+      lcd.clear();
+      lcd.print("Dibatalkan");
+      delay(1500);
+
+      lcd.clear(); lcd.setCursor(0, 0);
+      if (inputMode) lcd.print("Berat " + currentInput + " kg");
+      else lcd.print("Rp. " + currentInput);
+      lcd.setCursor(0, 1);
+      lcd.print("Beras Jenis "); lcd.print((selectedServo == 1) ? 'A' : 'B');
+    }
+    return;
   }
 
   if (specialMode == CONFIRM_ROLLBACK) {
@@ -534,6 +677,8 @@ server.on("/", HTTP_GET, []() {
           <input type="number" step="100" name="priceA" value="%PRICEA%">
           <label>Price per Kg B (Rp):</label>
           <input type="number" step="100" name="priceB" value="%PRICEB%">
+          <label>Calibration Factor:</label>
+          <input type="number" step="1" name="calFactor" value="%CAL%">
           <button type="submit">Save</button>
         </form>
         <br>
@@ -554,6 +699,7 @@ server.on("/", HTTP_GET, []() {
   html.replace("%MINP%", String(minPrice, 0));
   html.replace("%PRICEA%", String(pricePerKgA, 0));
   html.replace("%PRICEB%", String(pricePerKgB, 0));
+  html.replace("%CAL%", String(calFactor, 2));
   html.replace("%TOTALKG%", String(totalRiceDropped, 2));
   html.replace("%TOTALEARN%", String(totalEarnings, 0));
 
@@ -565,6 +711,8 @@ server.on("/", HTTP_GET, []() {
     if (server.hasArg("minPrice")) minPrice = server.arg("minPrice").toFloat();
     if (server.hasArg("priceA")) pricePerKgA = server.arg("priceA").toFloat();
     if (server.hasArg("priceB")) pricePerKgB = server.arg("priceB").toFloat();
+    if (server.hasArg("calFactor")) calFactor = server.arg("calFactor").toFloat();
+    LoadCell.setCalFactor(calFactor);
     savePersistentData();
     server.sendHeader("Location", "/");
     server.send(303);
@@ -602,7 +750,7 @@ void setup() {
 
   delay(2500);
   lcd.clear(); lcd.print("Lalu, Tekan");
-  lcd.setCursor(0,1); lcd.print("Tombol Acak");
+  lcd.setCursor(0,1); lcd.print("Tombol Keypad");
 }
 
 void loop() {
@@ -610,6 +758,65 @@ void loop() {
   LoadCell.update();
 
   keypad.getKeys();  // always update key states
+
+  if (passwordMode == ENTER_PASS) {
+    keypad.getKeys();
+
+    static bool showPassword = false; // Tracks toggle state
+
+    for (int i = 0; i < LIST_MAX; i++) {
+      char key = keypad.key[i].kchar;
+      KeyState state = keypad.key[i].kstate;
+
+      if (state == PRESSED && keypad.key[i].stateChanged) {
+        if (key >= '0' && key <= '9') {
+          passwordInput += key;
+        } else if (key == '#') {
+          if (passwordInput.length() > 0)
+            passwordInput.remove(passwordInput.length() - 1);
+        } else if (key == 'C') {
+          passwordInput = "";
+        } else if (key == 'A') {
+          showPassword = !showPassword;  // Toggle visibility
+        } else if (key == 'D') {
+          if (passwordInput == ADMIN_PASSWORD) {
+            passwordMode = NONE_PASS;
+            lcd.clear(); lcd.print("Password Benar");
+            delay(1000);
+            handleAuthorizedHeldKey(pendingKey);
+            pendingKey = '\0';
+            passwordInput = "";
+            showPassword = false;
+          } else {
+            lcd.clear(); lcd.print("Password Salah");
+            delay(1500);
+            passwordMode = NONE_PASS;
+            pendingKey = '\0';
+            passwordInput = "";
+            showPassword = false;
+            lcd.clear(); lcd.print("Tekan Tombol");
+            lcd.setCursor(0, 1); lcd.print("Untuk Memulai");
+            awaitingInput = false;
+          }
+          return;
+        }
+
+        // Show password input (either * or plain)
+        lcd.setCursor(0, 1);
+        lcd.print("                "); // clear line
+        lcd.setCursor(0, 1);
+        if (showPassword) {
+          lcd.print(passwordInput);
+        } else {
+          for (int i = 0; i < passwordInput.length(); i++) {
+            lcd.print("*");
+          }
+        }
+      }
+    }
+
+    return; // don't continue loop while in password mode
+  }
 
   for (int i = 0; i < LIST_MAX; i++) {
     char key = keypad.key[i].kchar;
