@@ -29,6 +29,8 @@
 | Keypad           | 4x4 matrix keypad           |
 | LCD Display      | 16x2 I2C                    |
 | Power Supply     | Sufficient for servo + ESP  |
+| Buzzer           | Warning for rice runout     |
+| Relay            | Sufficient for Buzzer       |
 
 ---
 
@@ -57,6 +59,7 @@ All settings are stored in EEPROM.
 | C (hold)         | Confirm reset earnings & weight          |
 | D (hold)         | Show total income                        |
 | # (hold)         | Rollback last transaction                |
+| * (hold)         | Setting calfactor value                  |
 | A                | Switch between weight/price mode         |
 | B                | Toggle rice type (A/B)                   |
 | D                | Start dispensing                         |
@@ -73,6 +76,7 @@ All settings are stored in EEPROM.
 - `totalEarnings`
 - `totalRiceDropped`
 - `lastDropWeight` / `lastDropType`
+- `calFactor`
 
 All stored using EEPROM on the ESP32.
 
@@ -101,6 +105,7 @@ All stored using EEPROM on the ESP32.
 - Prices are rounded to the nearest 500
 - System uses a 60s timeout during dispensing
 - Dispensing is blocked if minimums aren't met
+- Buzzer will make a sound for 30 seconds when timeout (Rice runout)
 
 ---
 
