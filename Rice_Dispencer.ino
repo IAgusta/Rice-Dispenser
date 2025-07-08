@@ -15,10 +15,16 @@ const int HX711_sck = 16;
 HX711_ADC LoadCell(HX711_dout, HX711_sck);
 const float CALIBRATION_FACTOR = 180.0;
 
+#define Buzzer 5
+bool buzzerFailed = false;
+unsigned long buzzerStartTime = 0;
+unsigned long lastBuzzerToggle = 0;
+bool buzzerState = false;
+
 #define SERVO_PIN_1 19
 #define SERVO_PIN_2 23
-#define SERVO_PIN_3 5
-Servo servo1, servo2, servo3;
+
+Servo servo1, servo2;
 int selectedServo = 1;
 const int SERVO_OPEN_ANGLE = 90;
 const int SERVO_CLOSE_ANGLE = 0;
@@ -87,6 +93,24 @@ float lastDropWeight = 0.0;
 float calFactor = CALIBRATION_FACTOR;
 int lastDropType = 1;
 
+void BuzzerActive(bool state) {
+  buzzerState = state;
+  digitalWrite(Buzzer, state ? HIGH : LOW);  // LOW = ON (relay active)
+  Serial.println(state ? "Buzzer ON" : "Buzzer OFF");
+}
+
+void cancelBuzzer() {
+  if (buzzerFailed) {
+    buzzerFailed = false;
+    BuzzerActive(false);
+  }
+}
+
+void initializeBuzzer(){
+  pinMode(Buzzer, OUTPUT);
+  BuzzerActive(false);          // make sure buzzer is OFF
+}
+
 void initializeLCD() {
   Wire.begin(21, 22);
   lcd.begin();
@@ -114,13 +138,10 @@ void initializeServo() {
   ESP32PWM::allocateTimer(3);
   servo1.setPeriodHertz(50);
   servo2.setPeriodHertz(50);
-  servo3.setPeriodHertz(50);
   servo1.attach(SERVO_PIN_1, 500, 2400);
   servo2.attach(SERVO_PIN_2, 500, 2400);
-  servo3.attach(SERVO_PIN_3, 500, 2400);
   servo1.write(SERVO_CLOSE_ANGLE);
   servo2.write(SERVO_CLOSE_ANGLE);
-  servo3.write(SERVO_OPEN_ANGLE);
 }
 
 void loadPersistentData() {
@@ -171,10 +192,9 @@ void executeTransaction() {
     targetWeight = inputValue / pricePerKg;
   }
 
-  servo3.write(SERVO_CLOSE_ANGLE); // Close output door
   lcd.clear(); lcd.print("Memulai Proses..");
   delay(500);
-  lcd.setCursor(0, 1); lcd.print("Menutup Pintu...");
+  lcd.setCursor(0, 1); lcd.print("Tunggu Sebentar...");
   delay(1500);
   lcd.clear(); lcd.print("Menyiapkan");
   lcd.setCursor(0, 1); lcd.print("Timbangan...");
@@ -230,6 +250,7 @@ void executeTransaction() {
   delay(1000);
 
   if (avgWeight >= targetWeight) {
+    BuzzerActive(false);
     lastDropWeight = avgWeight;
     lastDropType = selectedServo;
 
@@ -240,9 +261,8 @@ void executeTransaction() {
     totalEarnings += roundedPrice;
     savePersistentData();
 
-    servo3.write(SERVO_OPEN_ANGLE); // Open output door
     lcd.clear(); lcd.print("Transaksi Berhasil");
-    lcd.setCursor(0, 1); lcd.print("Pintu Dapat Dibuka");
+    lcd.setCursor(0, 1); lcd.print("Dapat Diambil");
     delay(2500);
 
     lcd.clear(); lcd.print("Harga Beras:");
@@ -261,6 +281,12 @@ void executeTransaction() {
     delay(3000);
     lastDropWeight = 0;
     lastDropType = 0;
+
+    buzzerFailed = true;
+    buzzerStartTime = millis();
+    lastBuzzerToggle = millis();
+    buzzerState = true;
+    BuzzerActive(true);
   }
 
   currentInput = "";
@@ -268,6 +294,7 @@ void executeTransaction() {
 }
 
 void processKey(char key) {
+  // cancelBuzzer();
   if (specialMode != NONE || awaitingInput) return;
 
   if (inputCleared) { currentInput = ""; inputCleared = false; }
@@ -304,7 +331,6 @@ void processKey(char key) {
         if (currentInput.length() > 0 && specialMode == NONE) {
           specialMode = CONFIRM_EXECUTE;
           awaitingInput = true;
-          servo3.write(SERVO_CLOSE_ANGLE); // Close tray door first
           lcd.clear(); lcd.print("Lanjut Transaksi");
           lcd.setCursor(0, 1); lcd.print("Tidak: C, Ya: D");
         }
@@ -336,7 +362,7 @@ void handleHeldKey(char key) {
 
   if (key == 'D') {
     lcd.clear();
-    lcd.print("Total Pendapatan");
+    lcd.print("Total Keseluruhan");
     lcd.setCursor(0, 1);
     lcd.print("Rp." + String(totalEarnings, 0));
     delay(4000);
@@ -478,7 +504,6 @@ void handleSpecialInput(char key) {
       // Cancel, reopen door and return to input
       specialMode = NONE;
       awaitingInput = false;
-      servo3.write(SERVO_OPEN_ANGLE); // reopen if canceled
       lcd.clear();
       lcd.print("Dibatalkan");
       delay(1500);
@@ -730,6 +755,7 @@ server.on("/", HTTP_GET, []() {
 void setup() {
   Serial.begin(115200);
   EEPROM.begin(EEPROM_SIZE);
+  initializeBuzzer();
   initializeLCD();
   loadPersistentData();
   initializeScale();
@@ -837,6 +863,21 @@ void loop() {
         processKey(key);
         return;
       }
+    }
+  }
+
+  if (buzzerFailed) {
+    unsigned long currentTime = millis();
+
+    if (currentTime - buzzerStartTime >= 30000) {
+      // 0.5 minute passed
+      buzzerFailed = false;
+      BuzzerActive(false);
+    } else if (currentTime - lastBuzzerToggle >= 3000) {
+      // Toggle every 3 seconds
+      buzzerState = !buzzerState;
+      BuzzerActive(buzzerState);
+      lastBuzzerToggle = currentTime;
     }
   }
 }
