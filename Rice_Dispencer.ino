@@ -215,13 +215,19 @@ void executeTransaction() {
 
   if (selectedServo == 1) servo1.write(SERVO_OPEN_ANGLE);
   else servo2.write(SERVO_OPEN_ANGLE);
+  delay(500);
 
+    // Weighing logic with 10-second timeout (like you wanted)
   float weightBuffer[10] = {0};
   int bufferIndex = 0;
   float avgWeight = 0.0;
+  float lastSignificantWeight = 0.0;
+  unsigned long lastWeightIncreaseTime = millis();
   unsigned long startTime = millis();
+  const float WEIGHT_THRESHOLD = 0.01; // 10 grams minimum increase
+  const unsigned long NO_FLOW_TIMEOUT = 10000; // 10 seconds (your change)
 
-  while (millis() - startTime < 60000) {
+  while (true) {
     if (LoadCell.update()) {
       float newWeight = abs(LoadCell.getData()) / 1000.0;
 
@@ -239,7 +245,24 @@ void executeTransaction() {
       lcd.print("/");
       lcd.print(targetWeight, 2); lcd.print("kg");
 
-      if (avgWeight >= targetWeight) break;
+      // Check if weight has increased significantly
+      if (avgWeight - lastSignificantWeight > WEIGHT_THRESHOLD) {
+        lastSignificantWeight = avgWeight;
+        lastWeightIncreaseTime = millis();
+      }
+
+      // Check if target weight is reached
+      if (avgWeight >= targetWeight) {
+        break;
+      }
+
+      // Check if no rice has been dropping for 10 seconds
+      if (millis() - lastWeightIncreaseTime > NO_FLOW_TIMEOUT) {
+        lcd.clear(); lcd.print("Beras Habis");
+        lcd.setCursor(0, 1); lcd.print("Isi Beras");
+        delay(2000);
+        break;
+      }
     }
     delay(100);
   }
@@ -269,24 +292,26 @@ void executeTransaction() {
     lcd.setCursor(0, 1); lcd.print("Rp."); lcd.print(roundedPrice);
     delay(2500);
 
-    lcd.clear(); lcd.print("Total Keluar:");
-    lcd.setCursor(0, 1); lcd.print(totalRiceDropped, 2); lcd.print(" Kg");
-    delay(2500);
-
     lcd.clear(); lcd.print("Bisa Digunakan");
     lcd.setCursor(0, 1); lcd.print("Tekan Tombol");
   } else {
+       // FAILURE - Keep buzzer on and start failure sequence
     lcd.clear(); lcd.print("Tidak Cukup");
     lcd.setCursor(0, 1); lcd.print(avgWeight, 2); lcd.print(" kg");
     delay(3000);
+    
     lastDropWeight = 0;
     lastDropType = 0;
 
+    // Start buzzer failure sequence (30 seconds total, toggle every 3 seconds)
     buzzerFailed = true;
     buzzerStartTime = millis();
     lastBuzzerToggle = millis();
     buzzerState = true;
     BuzzerActive(true);
+    
+    lcd.clear(); lcd.print("Tekan Tombol");
+    lcd.setCursor(0, 1); lcd.print("Untuk Memulai");
   }
 
   currentInput = "";
@@ -361,11 +386,6 @@ void handleHeldKey(char key) {
   }
 
   if (key == 'D') {
-    lcd.clear();
-    lcd.print("Total Keseluruhan");
-    lcd.setCursor(0, 1);
-    lcd.print("Rp." + String(totalEarnings, 0));
-    delay(4000);
     specialMode = NONE;
     awaitingInput = false;
   }
