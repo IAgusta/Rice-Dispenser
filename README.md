@@ -57,7 +57,7 @@ All settings are stored in EEPROM.
 | A (hold)         | Set minimum quantity or price            |
 | B (hold)         | Edit price per kg for selected type      |
 | C (hold)         | Confirm reset earnings & weight          |
-| D (hold)         | Show total income                        |
+| D (hold)         | Reseting Stuck Key (can be changed later)|
 | # (hold)         | Rollback last transaction                |
 | * (hold)         | Setting calfactor value                  |
 | A                | Switch between weight/price mode         |
