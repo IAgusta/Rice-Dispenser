@@ -173,25 +173,48 @@ void savePersistentData() {
   EEPROM.commit();
 }
 
+// // /* ---------- calibration table (CF = 180) ---------- */
+// const uint8_t N = 15;
+// const uint16_t rawP[N]  = { 192, 277, 365, 449, 537, 629, 718, 806, 898, 986,1078,1166,1249,1344,1430};
+// const uint16_t realP[N] = { 100, 200, 300, 400, 500, 600, 700, 800, 900,1000,1100,1200,1300,1400,1500};
+
+// float correctReading(float w)
+// {
+//   if (w <= rawP[0]) return realP[0];
+//   if (w >= rawP[N-1]) return realP[N-1];
+
+//   for (uint8_t i = 1; i < N; ++i)
+//   {
+//     if (w <= rawP[i])
+//     {
+//       float p = (w - rawP[i-1]) / float(rawP[i] - rawP[i-1]);
+//       return realP[i-1] + p * (realP[i] - realP[i-1]);
+//     }
+//   }
+//   return w;   // never reached
+// }
+
 void executeTransaction() {
-  float inputValue = currentInput.toFloat();
-  float targetWeight = 0.0;
+  /* ---------- 1.  decide target in GRAMS ---------- */
+  float inputKg   = currentInput.toFloat();
+  float targetG   = 0;                     // target in grams
   float pricePerKg = (selectedServo == 1) ? pricePerKgA : pricePerKgB;
 
   if (inputMode) {
-    if (inputValue < minQuantity) {
+    if (inputKg < minQuantity) {
       lcd.clear(); lcd.print("Min "); lcd.print(minQuantity); lcd.print(" kg");
       delay(2000); return;
     }
-    targetWeight = inputValue;
+    targetG = inputKg * 1000.0f;           // kg → g
   } else {
-    if (inputValue < minPrice) {
+    if (inputKg < minPrice) {
       lcd.clear(); lcd.print("Min Rp."); lcd.print(minPrice);
       delay(2000); return;
     }
-    targetWeight = inputValue / pricePerKg;
+    targetG = (inputKg / pricePerKg) * 1000.0f; // kg → g
   }
 
+  /* ---------- 2.  tare ---------- */
   lcd.clear(); lcd.print("Memulai Proses..");
   delay(500);
   lcd.setCursor(0, 1); lcd.print("Tunggu Sebentar...");
@@ -204,8 +227,7 @@ void executeTransaction() {
   while (!LoadCell.update() || abs(LoadCell.getData()) > 50) {
     if (millis() - tareStart > 5000) {
       lcd.clear(); lcd.print("Tare Gagal!");
-      delay(2000);
-      return;
+      delay(2000); return;
     }
     delay(100);
   }
@@ -214,74 +236,78 @@ void executeTransaction() {
   lcd.setCursor(0, 1); lcd.print("Menimbang...");
 
   if (selectedServo == 1) servo1.write(SERVO_OPEN_ANGLE);
-  else servo2.write(SERVO_OPEN_ANGLE);
+  else                    servo2.write(SERVO_OPEN_ANGLE);
   delay(500);
 
-    // Weighing logic with 10-second timeout (like you wanted)
+  /* ---------- 3.  weighing loop (grams) ---------- */
   float weightBuffer[10] = {0};
-  int bufferIndex = 0;
-  float avgWeight = 0.0;
-  float lastSignificantWeight = 0.0;
+  int   bufferIndex = 0;
+  float avgG = 0;                        // running average in grams
+  float lastSignificantG = 0;
+  const float WEIGHT_THRESHOLD_G = 10.0f; // 10 g
+  const unsigned long NO_FLOW_TIMEOUT = 10000;
   unsigned long lastWeightIncreaseTime = millis();
-  unsigned long startTime = millis();
-  const float WEIGHT_THRESHOLD = 0.01; // 10 grams minimum increase
-  const unsigned long NO_FLOW_TIMEOUT = 10000; // 10 seconds (your change)
 
+  /* inside executeTransaction(), weighing loop -------------------- */
   while (true) {
     if (LoadCell.update()) {
-      float newWeight = abs(LoadCell.getData()) / 1000.0;
+      /* 1. smooth, weight-proportional offset */
+      float rawADC = abs(LoadCell.getData());       // grams
+      float dynCal = calFactor - 20.0f * (1000.0f - rawADC) / 1000.0f;
+      dynCal = constrain(dynCal, calFactor - 25.0f, calFactor + 25.0f);
 
-      weightBuffer[bufferIndex] = newWeight;
+      /* 2. apply correction table with that factor */
+      LoadCell.setCalFactor(dynCal);                // live change
+      float newG = rawADC;          // grams
+
+      /* 3. rest of your logic (buffer, avg, LCD, etc.) */
+      weightBuffer[bufferIndex] = newG;
       bufferIndex = (bufferIndex + 1) % 10;
 
       float sum = 0;
       for (int i = 0; i < 10; i++) sum += weightBuffer[i];
-      avgWeight = sum / 10.0;
+      avgG = sum / 10.0f;
 
       lcd.setCursor(0, 1);
       lcd.print("               ");
       lcd.setCursor(0, 1);
-      lcd.print(avgWeight, 2);
+      lcd.print(avgG / 1000.0f, 2);
       lcd.print("/");
-      lcd.print(targetWeight, 2); lcd.print("kg");
+      lcd.print(targetG / 1000.0f, 2);
+      lcd.print("kg");
 
-      // Check if weight has increased significantly
-      if (avgWeight - lastSignificantWeight > WEIGHT_THRESHOLD) {
-        lastSignificantWeight = avgWeight;
+      if (avgG - lastSignificantG > WEIGHT_THRESHOLD_G) {
+        lastSignificantG = avgG;
         lastWeightIncreaseTime = millis();
       }
 
-      // Check if target weight is reached
-      if (avgWeight >= targetWeight) {
-        break;
-      }
+      if (avgG >= targetG) break;
 
-      // Check if no rice has been dropping for 10 seconds
       if (millis() - lastWeightIncreaseTime > NO_FLOW_TIMEOUT) {
         lcd.clear(); lcd.print("Beras Habis");
         lcd.setCursor(0, 1); lcd.print("Isi Beras");
-        delay(2000);
-        break;
+        delay(2000); break;
       }
     }
     delay(100);
   }
 
-  // Close rice valve
+  /* ---------- 4.  close valve ---------- */
   if (selectedServo == 1) servo1.write(SERVO_CLOSE_ANGLE);
-  else servo2.write(SERVO_CLOSE_ANGLE);
+  else                    servo2.write(SERVO_CLOSE_ANGLE);
   delay(1000);
 
-  if (avgWeight >= targetWeight) {
+  /* ---------- 5.  finish / price ---------- */
+  if (avgG >= targetG) {
     BuzzerActive(false);
-    lastDropWeight = avgWeight;
-    lastDropType = selectedServo;
+    lastDropWeight = avgG / 1000.0f;   // store kg
+    lastDropType   = selectedServo;
 
-    float rawPrice = avgWeight * pricePerKg;
-    int roundedPrice = ((int)(rawPrice + 250) / 500) * 500;
+    float rawPrice = lastDropWeight * pricePerKg;
+    int   rounded  = ((int)(rawPrice + 250) / 500) * 500;
 
-    totalRiceDropped += avgWeight;
-    totalEarnings += roundedPrice;
+    totalRiceDropped += lastDropWeight;
+    totalEarnings    += rounded;
     savePersistentData();
 
     lcd.clear(); lcd.print("Transaksi Berhasil");
@@ -289,27 +315,25 @@ void executeTransaction() {
     delay(2500);
 
     lcd.clear(); lcd.print("Harga Beras:");
-    lcd.setCursor(0, 1); lcd.print("Rp."); lcd.print(roundedPrice);
+    lcd.setCursor(0, 1); lcd.print("Rp."); lcd.print(rounded);
     delay(2500);
 
     lcd.clear(); lcd.print("Bisa Digunakan");
     lcd.setCursor(0, 1); lcd.print("Tekan Tombol");
   } else {
-       // FAILURE - Keep buzzer on and start failure sequence
     lcd.clear(); lcd.print("Tidak Cukup");
-    lcd.setCursor(0, 1); lcd.print(avgWeight, 2); lcd.print(" kg");
+    lcd.setCursor(0, 1); lcd.print(avgG / 1000.0f, 2); lcd.print(" kg");
     delay(3000);
-    
-    lastDropWeight = 0;
-    lastDropType = 0;
 
-    // Start buzzer failure sequence (30 seconds total, toggle every 3 seconds)
+    lastDropWeight = 0;
+    lastDropType   = 0;
+
     buzzerFailed = true;
     buzzerStartTime = millis();
     lastBuzzerToggle = millis();
     buzzerState = true;
     BuzzerActive(true);
-    
+
     lcd.clear(); lcd.print("Tekan Tombol");
     lcd.setCursor(0, 1); lcd.print("Untuk Memulai");
   }
